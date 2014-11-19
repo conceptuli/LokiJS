@@ -45,7 +45,7 @@ var loki = (function () {
   };
 
   LokiEventEmitter.prototype.emit = function (eventName) {
-    var args = Array.prototype.slice.call(arguments,0);
+    var args = Array.prototype.slice.call(arguments, 0);
     if (eventName && this.events[eventName]) {
       args.splice(0, 1);
       this.events[eventName].forEach(function (listener) {
@@ -71,9 +71,12 @@ var loki = (function () {
   function Loki(filename) {
     this.filename = filename || 'loki.db';
     this.collections = [];
+    this.changes = [];
     this.events = {
-      'close': []
+      'close': [],
+      'changes': []
     };
+    var self = this;
 
     var getENV = function () {
       if ((typeof module !== 'undefined') && module.exports) {
@@ -94,6 +97,12 @@ var loki = (function () {
     if (this.ENV === 'NODEJS') {
       this.fs = require('fs');
     }
+
+    this.on('changes', function (change) {
+      setTimeout(function () {
+        self.changes.push(change);
+      }, 1);
+    });
 
   }
 
@@ -294,7 +303,7 @@ var loki = (function () {
     var isdesc = false;
     var firstProp = properties[0];
     if (typeof (firstProp) !== 'string') {
-      if (Array.isArray (firstProp)) {
+      if (Array.isArray(firstProp)) {
         isdesc = firstProp[1];
         firstProp = firstProp[0];
       }
@@ -303,8 +312,7 @@ var loki = (function () {
     if (obj1[firstProp] === obj2[firstProp]) {
       if (propertyCount === 1) {
         return 0;
-      }
-      else {
+      } else {
         return this.compoundeval(properties.slice(1), obj1, obj2, isdesc);
       }
     }
@@ -340,7 +348,7 @@ var loki = (function () {
           return rslt.compoundeval(props, obj1, obj2);
         }
       })(properties, this);
-      
+
     this.filteredrows.sort(wrappedComparer);
 
     return this;
@@ -364,10 +372,10 @@ var loki = (function () {
     var mid = null;
     var lbound = 0;
     var ubound = index.length - 1;
-    
+
     // when no documents are in collection, return empty range condition
     if (rcd.length == 0) return [0, -1];
-    
+
     var minVal = rcd[index[min]][prop];
     var maxVal = rcd[index[max]][prop];
 
@@ -493,7 +501,7 @@ var loki = (function () {
     function $in(a, b) {
       return b.indexOf(a) > -1;
     }
-    
+
     function $contains(a, b) {
       if (Array.isArray(a)) {
         return a.indexOf(b) !== -1;
@@ -503,7 +511,7 @@ var loki = (function () {
         return a.indexOf(b) !== -1;
       }
 
-      if (typeof a === 'object') {
+      if (a && typeof a === 'object') {
         return a.hasOwnProperty(b);
       }
 
@@ -972,15 +980,19 @@ var loki = (function () {
     this.sortColumnDesc = false;
     this.sortDirty = false;
 
+    // may add map and reduce phases later
+
     // for now just have 1 event for when we finally rebuilt lazy view
     // once we refactor transactions, i will tie in certain transactional events
+
     this.events = {
       'rebuild': []
     };
-  };
+  }
 
   DynamicView.prototype = new LokiEventEmitter;
-  
+
+
   /**
    * rematerialize() - intended for use immediately after deserialization (loading)
    *    This will clear out and reapply filterPipeline ops, recreating the view.
@@ -990,12 +1002,14 @@ var loki = (function () {
    * @param {Object} options - (Optional) allows specification of 'removeWhereFilters' option
    * @returns {DynamicView} This dynamic view for further chained ops.
    */
-  DynamicView.prototype.rematerialize = function(options) {
+  DynamicView.prototype.rematerialize = function (options) {
     var fpl,
       fpi,
       idx;
 
-    options = options || { };
+
+
+    options = options || {};
 
     this.resultdata = [];
     this.resultsdirty = true;
@@ -1034,8 +1048,10 @@ var loki = (function () {
     // during creation of unit tests, i will remove this forced refresh and leave lazy
     this.data();
 
+
     // emit rebuild event in case user wants to be notified
     this.emit('rebuild', this);
+
 
     return this;
   };
@@ -1059,7 +1075,7 @@ var loki = (function () {
     var copy = new DynamicView(this.collection, this.name, this.persistent);
 
     copy.resultset = this.resultset;
-    copy.resultdata = [];  // let's not save data (copy) to minimize size
+    copy.resultdata = []; // let's not save data (copy) to minimize size
     copy.resultsdirty = true;
     copy.filterPipeline = this.filterPipeline;
     copy.sortFunction = this.sortFunction;
@@ -1147,7 +1163,7 @@ var loki = (function () {
       // so we will for now just rebuild the persistent dynamic view data in this worst case scenario
       // (a persistent view utilizing transactions which get rolled back), we already know the filter so not too bad.
       this.resultdata = this.resultset.data();
-      
+
       this.emit('rebuild', this);
     }
 
@@ -1229,7 +1245,7 @@ var loki = (function () {
       if (!this.resultset.filterInitialized) {
         this.emit('rebuild', this);
       }
-      
+
       return this.resultset.data();
     }
 
@@ -1237,7 +1253,7 @@ var loki = (function () {
     if (this.resultsdirty) {
       this.resultdata = this.resultset.data();
       this.resultsdirty = false;
-    
+
       // user can intercept via dynView.on('rebuild', myCallback);
       this.emit('rebuild', this);
     }
@@ -1376,9 +1392,13 @@ var loki = (function () {
   /**
    * @constructor
    * Collection class that handles documents of same type
+   * @param {stirng} collection name
+   * @param {array} array of property names to be indicized
+   * @param {object} configuration object
    */
-  function Collection(name, indices, transactionOptions) {
-    // the name of the collection
+  function Collection(name, indices, options) {
+    // the name of the collection 
+
     this.name = name;
     // the data held by the collection
     this.data = [];
@@ -1387,14 +1407,17 @@ var loki = (function () {
     // the object type of the collection
     this.objType = name;
 
+    // this enables changes  notifications
+    this.db = null;
+
     /** Transactions properties */
     // is collection transactional
-    this.transactional = transactionOptions || false;
+    this.transactional = options ? options.transactional : false;
     // private holders for cached data
     this.cachedIndex = null;
     this.cachedBinaryIndex = null;
     this.cachedData = null;
-
+    this.cloneObjects = options ? options.clone : false;
     // currentMaxId - change manually at your own peril!
     this.maxId = 0;
     // view container is an object because each views gets a name
@@ -1421,7 +1444,7 @@ var loki = (function () {
         this.ensureBinaryIndex(indices[idx]);
       };
     }
-    
+
     this.on('insert', function (obj) {
       //console.log('Passed to on-insert', obj);
       setTimeout(function () {
@@ -1432,27 +1455,39 @@ var loki = (function () {
 
       }, 1);
     });
-    
+
     this.on('update', function (obj) {
       setTimeout(function () {
         obj.meta.updated = (new Date()).getTime();
         obj.meta.revision += 1;
       }, 1);
     });
-    
+
     this.on('warning', function (obj) {
       setTimeout(function () {
         console.warn(obj);
       }, 1);
     });
-    
+
   }
 
   Collection.prototype = new LokiEventEmitter;
 
+
+  Loki.prototype.generateChangesNotification = function () {
+
+    var self = this,
+      changesArray = [];
+
+    self.changes.forEach(function (i) {
+      changesArray.push(self.collections[i.collection].get(i.id));
+    });
+    return changesArray;
+  };
+
   /**
    * anonym() - shorthand method for quickly creating and populating an anonymous collection.
-   *    This collection is not referenced internally so upon losing scope it will be garbage collected. 
+   *    This collection is not referenced internally so upon losing scope it will be garbage collected.
    *
    *    Example : var results = new loki().anonym(myDocArray).find({'age': {'$gt': 30} });
    *
@@ -1465,10 +1500,11 @@ var loki = (function () {
     collection.insert(docs);
     return collection;
   }
-  
-  Loki.prototype.addCollection = function (name, indexesArray, transactional) {
-    var collection = new Collection(name, indexesArray, transactional);
+
+  Loki.prototype.addCollection = function (name, indexesArray, options) {
+    var collection = new Collection(name, indexesArray, options);
     this.collections.push(collection);
+    collection.db = this;
     return collection;
   };
 
@@ -1596,7 +1632,9 @@ var loki = (function () {
         dv.resultset.searchIsChained = colldv.resultset.searchIsChained;
         dv.resultset.filterInitialized = colldv.resultset.filterInitialized;
 
-        dv.rematerialize({ removeWhereFilters: true });
+        dv.rematerialize({
+          removeWhereFilters: true
+        });
       }
     }
   };
@@ -1604,7 +1642,7 @@ var loki = (function () {
   // load db from a file
   Loki.prototype.loadDatabase = function (options, callback) {
     var cFun = callback || function (err, data) {
-        if(err) {
+        if (err) {
           throw err;
         }
         return;
@@ -1636,7 +1674,7 @@ var loki = (function () {
   // save file to disk as json
   Loki.prototype.saveToDisk = function (callback) {
     var cFun = callback || function (err) {
-        if(err) {
+        if (err) {
           throw err;
         }
         return;
@@ -1647,7 +1685,7 @@ var loki = (function () {
       this.fs.exists(this.filename, function (exists) {
         if (exists) {
           self.fs.unlink(self.filename, function (err) {
-            if(err) {
+            if (err) {
               return cFun(err);
             }
             self.fs.writeFile(self.filename, self.serialize(), cFun);
@@ -1821,19 +1859,32 @@ var loki = (function () {
    * generate document method - ensure objects have id and objType properties
    * Come to think of it, really unfortunate name because of what document normally refers to in js.
    * that's why there's an alias below but until I have this implemented
+   * @param {object} the document to be inserted (or an array of objects)
+   * @returns document or documents (if array)
    */
   Collection.prototype.insert = function (doc) {
     var self = this;
-
+    // holder to the clone of the object inserted if collections is set to clone objects
+    var obj;
     if (Array.isArray(doc)) {
       doc.forEach(function (d) {
-        d.objType = self.objType;
-        if (typeof d.meta === 'undefined') d.meta = {};
-
-        self.add(d);
-        self.emit('insert', d);
+        if (self.clone) {
+          obj = JSON.parse(JSON.stringify(d));
+        } else {
+          obj = d;
+        }
+        //d.objType = self.objType;
+        if (typeof obj.meta === 'undefined') {
+          obj.meta = {};
+        }
+        self.add(obj);
+        self.emit('insert', obj);
+        self.db.emit('changes', {
+          collection: self.name,
+          id: obj.id
+        });
       });
-      return doc;
+      return obj;
     } else {
       if (typeof doc !== 'object') {
         throw new TypeError('Document needs to be an object');
@@ -1844,11 +1895,23 @@ var loki = (function () {
         this.emit('error', error);
         throw error;
       }
-      doc.objType = this.objType;
-      if (typeof doc.meta === 'undefined') doc.meta = {};
-      this.add(doc);
-      this.emit('insert', doc);
-      return doc;
+      if (self.clone) {
+        obj = JSON.parse(JSON.stringify(doc));
+      } else {
+        obj = doc;
+      }
+      //doc.objType = self.objType;
+
+      if (typeof doc.meta === 'undefined') {
+        obj.meta = {};
+      }
+      self.add(obj);
+      self.emit('insert', obj);
+      self.db.emit('changes', {
+        collection: self.name,
+        id: obj.id
+      });
+      return obj;
     }
   };
 
